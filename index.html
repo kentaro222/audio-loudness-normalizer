@@ -2005,6 +2005,12 @@ function updateFormatUI(){
     isMP3
     ? "MP3に変換"
     : "OGGに変換";
+
+
+  download.textContent =
+    isMP3
+    ? "変換済みMP3を保存"
+    : "変換済みOGGを保存";
 }
 
 
@@ -3643,6 +3649,12 @@ convertBtn.addEventListener(
           ? "ogg"
           : "mp3"
         }`;
+
+
+      download.textContent =
+        outputFormat === "ogg"
+        ? "変換済みOGGを保存"
+        : "変換済みMP3を保存";
 
 
       download.hidden =
