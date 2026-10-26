@@ -396,6 +396,15 @@
     ></div>
 
 
+    <div id="loudnessResult" class="status" role="status" aria-live="polite">
+      元音声のラウドネス：ファイル選択後に自動解析します。
+    </div>
+    <p class="note">
+      目標範囲：−14 LUFS ±0.5 LU、トゥルーピーク −1.5 dBTP以下。
+      現在の音量を判定するもので、過去のノーマライズ処理の有無を示すものではありません。
+      解析中・変換中はファイルを切り替えられません。
+    </p>
+
     <!-- 出力設定 -->
 
     <div class="settings">
@@ -776,6 +785,50 @@ const oggQualitySetting =
 ========================================================= */
 
 let inputFile = null;
+let processing = false;
+const loudnessResult = $("#loudnessResult");
+
+async function analyzeSourceLoudness(file){
+  const name = "loudness_input.bin";
+  loudnessResult.textContent = "元音声のラウドネス：解析中…";
+  loudnessResult.dataset.result = "analyzing";
+  try{
+    await loadFFmpeg();
+    await ffmpeg.writeFile(name, new Uint8Array(await file.arrayBuffer()));
+    logs = [];
+    const code = await ffmpeg.exec([
+      "-hide_banner", "-i", name, "-map", "0:a:0", "-vn",
+      "-af", "loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json",
+      "-f", "null", "-"
+    ]);
+    if(code !== 0) throw new Error("音声を解析できませんでした。");
+    const measured = parseLoudnormJSON(logs.join("\n"));
+    const integrated = Number(measured.input_i);
+    const peak = Number(measured.input_tp);
+    if(!Number.isFinite(integrated) || !Number.isFinite(peak)){
+      loudnessResult.dataset.result = "unknown";
+      loudnessResult.textContent = "元音声：判定できません（無音・短すぎる音声など）。";
+      return;
+    }
+    const inRange = Math.abs(integrated + 14) <= 0.5 && peak <= -1.5;
+    const reasons = [];
+    if(integrated < -14.5) reasons.push("音量が目標より小さい");
+    if(integrated > -13.5) reasons.push("音量が目標より大きい");
+    if(peak > -1.5) reasons.push("ピークが上限を超過");
+    loudnessResult.dataset.result = inRange ? "in-range" : "adjust";
+    loudnessResult.textContent =
+      "元音声：" + (inRange ? "目標範囲内" : "調整を推奨（" + reasons.join("、") + "）") +
+      " ／ " + integrated.toFixed(2) + " LUFS ／ トゥルーピーク " + peak.toFixed(2) + " dBTP";
+  }catch(err){
+    console.error(err);
+    loudnessResult.dataset.result = "unknown";
+    loudnessResult.textContent = "元音声：判定できません（音声形式や処理ログを確認してください）。";
+  }finally{
+    if(ffmpeg){
+      try{ await ffmpeg.deleteFile(name); }catch{}
+    }
+  }
+}
 
 let ffmpeg = null;
 let FFmpegClass = null;
@@ -1883,11 +1936,15 @@ async function readSourceMetadata(
    ファイル選択
 ========================================================= */
 
-function showFile(
+async function showFile(
   file
 ){
-
+  if(processing) return;
+  processing = true;
+  fileEl.disabled = true;
   inputFile = file;
+  loudnessResult.dataset.result = "analyzing";
+  loudnessResult.textContent = "元音声のラウドネス：解析待ち…";
 
 
   const baseName =
@@ -1924,13 +1981,7 @@ function showFile(
     `;
 
 
-  convertBtn.disabled =
-    false;
-
-
-  convertBtn.removeAttribute(
-    "disabled"
-  );
+  convertBtn.disabled = true;
 
 
   download.hidden =
@@ -1970,14 +2021,25 @@ function showFile(
 
 
   setStatus(
-    "ファイルを読み込みました。変換ボタンを押してください。",
+    "ファイルを読み込みました。タグとラウドネスを解析しています。",
     "ok"
   );
 
 
-  readSourceMetadata(
-    file
-  );
+  try{
+    await readSourceMetadata(file);
+    await analyzeSourceLoudness(file);
+    if(loudnessResult.dataset.result === "unknown"){
+      setStatus("ラウドネスを判定できませんでした。処理ログを確認してください。");
+    }else{
+      setStatus("解析が完了しました。必要に応じて変換してください。", "ok");
+    }
+  }finally{
+    processing = false;
+    fileEl.disabled = false;
+    convertBtn.disabled = false;
+    progress.value = 0;
+  }
 }
 
 
@@ -3254,14 +3316,15 @@ convertBtn.addEventListener(
   async () => {
 
     if(
-      !inputFile
+      !inputFile || processing
     ){
       return;
     }
 
 
-    convertBtn.disabled =
-      true;
+    processing = true;
+    fileEl.disabled = true;
+    convertBtn.disabled = true;
 
 
     download.hidden =
@@ -3725,6 +3788,8 @@ convertBtn.addEventListener(
 
 
     }finally{
+      processing = false;
+      fileEl.disabled = false;
 
       progress.dataset.stage =
         "";
