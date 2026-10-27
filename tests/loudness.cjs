@@ -30,15 +30,22 @@ const path = require("node:path");
     const errors = [];
     page.on("pageerror", e => errors.push(e.message));
     await page.goto(process.env.TEST_URL || "http://127.0.0.1:8000/");
-    assert.equal(await page.locator("#analyze").isEnabled(), false);
+    // Observe real FFmpeg commands to prove encoding does not rerun analysis.
+    await page.evaluate(() => {
+      const postMessage = Worker.prototype.postMessage;
+      window.ffmpegCommands = [];
+      Worker.prototype.postMessage = function(message, ...rest) {
+        if(message.type === "EXEC") window.ffmpegCommands.push([...message.data.args]);
+        return postMessage.call(this, message, ...rest);
+      };
+    });
+    const analysisCount = () => page.evaluate(() =>
+      window.ffmpegCommands.filter(args =>
+        args.includes("loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json")).length);
     async function select(name) {
+      await page.locator("#file").setInputFiles([]);
       await page.locator("#file").setInputFiles(media(name));
       await page.waitForFunction(() => !document.querySelector("#file").disabled,
-        {}, { timeout: 60000 });
-    }
-    async function analyze() {
-      await page.locator("#analyze").click();
-      await page.waitForFunction(() => !document.querySelector("#analyze").disabled,
         {}, { timeout: 60000 });
     }
     for (const [name, expected] of [
@@ -46,29 +53,35 @@ const path = require("node:path");
       ["loud.wav", "adjust"], ["silence.wav", "unknown"],
       ["invalid.wav", "unknown"]
     ]) {
+      const before = await analysisCount();
       await select(name);
-      assert.equal(await page.locator("#loudnessResult").getAttribute("data-result"), "pending");
-      assert.match(await page.locator("#loudnessResult").textContent(), /未解析/);
-      assert.equal(await page.locator("#analyze").isEnabled(), true);
-      await analyze();
+      assert.equal(await analysisCount(), before + 1);
       assert.equal(await page.locator("#loudnessResult").getAttribute("data-result"), expected);
       assert.equal(await page.locator("#convert").isEnabled(), true);
       console.log(name + ": " + await page.locator("#loudnessResult").textContent());
     }
+    // Failed automatic analysis must not reuse an earlier valid measurement.
+    const beforeRetry = await analysisCount();
+    await page.locator("#convert").click();
+    await page.waitForFunction(() => !document.querySelector("#convert").disabled,
+      {}, { timeout: 60000 });
+    assert.match(await page.locator("#status").textContent(), /エラー：/);
+    assert.equal(await analysisCount(), beforeRetry + 1);
+    // A new File with the same name must be reanalyzed, not matched by name.
     await select("target.wav");
-    await analyze();
-    await analyze();
-    assert.equal(await page.locator("#loudnessResult").getAttribute("data-result"), "in-range");
-    // A valid selection after failed analysis must still work, including encoding.
+    const count = await analysisCount();
     await select("target.wav");
+    assert.equal(await analysisCount(), count + 1);
+    const beforeEncoding = await analysisCount();
     assert.equal(await page.locator("#title").inputValue(), "Test tone");
+    await page.locator("#title").fill("Edited title");
     for (const format of ["mp3", "ogg"]) {
       await page.locator("#format").selectOption(format);
       await page.locator("#convert").click();
       await page.waitForFunction(() => !document.querySelector("#convert").disabled,
         {}, { timeout: 120000 });
       assert.match(await page.locator("#status").textContent(), /完了：/);
-      assert.equal(await page.locator("#analyze").isEnabled(), true);
+      assert.equal(await analysisCount(), beforeEncoding);
       const downloadPromise = page.waitForEvent("download");
       await page.locator("#download").click();
       const download = await downloadPromise;
@@ -80,6 +93,21 @@ const path = require("node:path");
       assert.ok(Math.abs(Number(info.format.duration) - 3) < 0.2);
       console.log(format + ": download and codec verified");
     }
+    const targetFilter = await page.evaluate(() =>
+      window.ffmpegCommands.findLast(args => args.some(arg =>
+        arg.includes("measured_I="))).find(arg => arg.includes("measured_I=")));
+    await select("quiet.wav");
+    assert.equal(await analysisCount(), beforeEncoding + 1);
+    await page.locator("#convert").click();
+    await page.waitForFunction(() => !document.querySelector("#convert").disabled,
+      {}, { timeout: 120000 });
+    assert.match(await page.locator("#status").textContent(), /完了：/);
+    assert.equal(await analysisCount(), beforeEncoding + 1);
+    const quietFilter = await page.evaluate(() =>
+      window.ffmpegCommands.findLast(args => args.some(arg =>
+        arg.includes("measured_I="))).find(arg => arg.includes("measured_I=")));
+    assert.notEqual(quietFilter, targetFilter);
+    console.log("Cached analysis reused across formats and invalidated on file change");
     assert.deepEqual(errors, []);
   } finally {
     if (browser) await browser.close();

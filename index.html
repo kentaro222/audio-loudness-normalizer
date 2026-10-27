@@ -396,9 +396,8 @@
     ></div>
 
 
-    <button id="analyze" type="button" disabled>ラウドネスを解析</button>
     <div id="loudnessResult" class="status" role="status" aria-live="polite">
-      元音声のラウドネス：未解析。ファイルを選択して解析ボタンを押してください。
+      元音声のラウドネス：ファイル選択後に自動解析します。
     </div>
     <p class="note">
       目標範囲：−14 LUFS ±0.5 LU、トゥルーピーク −1.5 dBTP以下。
@@ -788,7 +787,19 @@ const oggQualitySetting =
 let inputFile = null;
 let processing = false;
 const loudnessResult = $("#loudnessResult");
-const analyzeBtn = $("#analyze");
+// Bind measurements to this File object, never just its name or size.
+let sourceAnalysis = null;
+
+async function measureLoudness(name){
+  logs = [];
+  const code = await ffmpeg.exec([
+    "-hide_banner", "-i", name, "-map", "0:a:0", "-vn",
+    "-af", "loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json",
+    "-f", "null", "-"
+  ]);
+  if(code !== 0) throw new Error("音声を解析できませんでした。");
+  return parseLoudnormJSON(logs.join("\n"));
+}
 
 async function analyzeSourceLoudness(file){
   const name = "loudness_input.bin";
@@ -797,14 +808,12 @@ async function analyzeSourceLoudness(file){
   try{
     await loadFFmpeg();
     await ffmpeg.writeFile(name, new Uint8Array(await file.arrayBuffer()));
-    logs = [];
-    const code = await ffmpeg.exec([
-      "-hide_banner", "-i", name, "-map", "0:a:0", "-vn",
-      "-af", "loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json",
-      "-f", "null", "-"
-    ]);
-    if(code !== 0) throw new Error("音声を解析できませんでした。");
-    const measured = parseLoudnormJSON(logs.join("\n"));
+    const measured = await measureLoudness(name);
+    // Only complete, finite results can be used for two-pass normalization.
+    if(["input_i", "input_tp", "input_lra", "input_thresh", "target_offset"]
+      .every(key => Number.isFinite(Number(measured[key])))){
+      sourceAnalysis = { file, measured };
+    }
     const integrated = Number(measured.input_i);
     const peak = Number(measured.input_tp);
     if(!Number.isFinite(integrated) || !Number.isFinite(peak)){
@@ -1943,11 +1952,11 @@ async function showFile(
 ){
   if(processing) return;
   processing = true;
-  analyzeBtn.disabled = true;
   fileEl.disabled = true;
   inputFile = file;
-  loudnessResult.dataset.result = "pending";
-  loudnessResult.textContent = "元音声のラウドネス：未解析。解析ボタンを押してください。";
+  sourceAnalysis = null;
+  loudnessResult.dataset.result = "analyzing";
+  loudnessResult.textContent = "元音声のラウドネス：解析待ち…";
 
 
   const baseName =
@@ -2031,39 +2040,19 @@ async function showFile(
 
   try{
     await readSourceMetadata(file);
-    setStatus("ファイルを読み込みました。解析または変換を実行できます。", "ok");
+    await analyzeSourceLoudness(file);
+    if(loudnessResult.dataset.result === "unknown"){
+      setStatus("ラウドネスを判定できませんでした。処理ログを確認してください。");
+    }else{
+      setStatus("解析が完了しました。結果を再利用して変換できます。", "ok");
+    }
   }finally{
     processing = false;
-    analyzeBtn.disabled = false;
     fileEl.disabled = false;
     convertBtn.disabled = false;
     progress.value = 0;
   }
 }
-
-
-analyzeBtn.addEventListener("click", async () => {
-  if(!inputFile || processing) return;
-  processing = true;
-  analyzeBtn.disabled = true;
-  convertBtn.disabled = true;
-  fileEl.disabled = true;
-  setStatus("元音声のラウドネスを解析しています…");
-  try{
-    await analyzeSourceLoudness(inputFile);
-    if(loudnessResult.dataset.result === "unknown"){
-      setStatus("ラウドネスを判定できませんでした。処理ログを確認してください。");
-    }else{
-      setStatus("解析が完了しました。必要に応じて変換してください。", "ok");
-    }
-  }finally{
-    processing = false;
-    analyzeBtn.disabled = false;
-    convertBtn.disabled = false;
-    fileEl.disabled = false;
-    progress.value = 0;
-  }
-});
 
 
 /* =========================================================
@@ -3346,7 +3335,6 @@ convertBtn.addEventListener(
 
 
     processing = true;
-    analyzeBtn.disabled = true;
     fileEl.disabled = true;
     convertBtn.disabled = true;
 
@@ -3447,47 +3435,18 @@ convertBtn.addEventListener(
       );
 
 
-      /* ================================================
-         PASS 1
-         Loudness解析
-      ================================================= */
-
-      progress.dataset.stage =
-        "analyze";
-
-
-      setStatus(
-        "1/2 ラウドネスを解析しています…"
-      );
-
-
-      logs =
-        [];
-
-
-      await ffmpeg.exec([
-
-        "-hide_banner",
-
-        "-i",
-        inName,
-
-        "-vn",
-
-        "-af",
-        "loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json",
-
-        "-f",
-        "null",
-
-        "-"
-      ]);
-
-
-      const measured =
-        parseLoudnormJSON(
-          logs.join("\n")
-        );
+      // Reuse the selected file's automatic analysis, including across formats.
+      let measured = sourceAnalysis?.file === inputFile
+        ? sourceAnalysis.measured
+        : null;
+      if(!measured){
+        progress.dataset.stage = "analyze";
+        setStatus("ラウドネスを解析しています…");
+        measured = await measureLoudness(inName);
+        ["input_i", "input_tp", "input_lra", "input_thresh", "target_offset"]
+          .forEach(key => safeNum(measured[key], key));
+        sourceAnalysis = { file: inputFile, measured };
+      }
 
 
       const input_i =
@@ -3541,9 +3500,9 @@ convertBtn.addEventListener(
       setStatus(
         outputFormat === "ogg"
 
-        ? "2/2 -14 LUFSへ補正してOGGを書き出しています…"
+        ? "-14 LUFSへ補正してOGGを書き出しています…"
 
-        : "2/2 -14 LUFSへ補正してMP3を書き出しています…"
+        : "-14 LUFSへ補正してMP3を書き出しています…"
       );
 
 
@@ -3588,6 +3547,9 @@ convertBtn.addEventListener(
 
         "-i",
         inName,
+
+        "-map",
+        "0:a:0",
 
         "-vn",
 
@@ -3813,7 +3775,6 @@ convertBtn.addEventListener(
 
     }finally{
       processing = false;
-      analyzeBtn.disabled = false;
       fileEl.disabled = false;
 
       progress.dataset.stage =
