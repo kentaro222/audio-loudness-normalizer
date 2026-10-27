@@ -30,9 +30,15 @@ const path = require("node:path");
     const errors = [];
     page.on("pageerror", e => errors.push(e.message));
     await page.goto(process.env.TEST_URL || "http://127.0.0.1:8000/");
+    assert.equal(await page.locator("#analyze").isEnabled(), false);
     async function select(name) {
       await page.locator("#file").setInputFiles(media(name));
       await page.waitForFunction(() => !document.querySelector("#file").disabled,
+        {}, { timeout: 60000 });
+    }
+    async function analyze() {
+      await page.locator("#analyze").click();
+      await page.waitForFunction(() => !document.querySelector("#analyze").disabled,
         {}, { timeout: 60000 });
     }
     for (const [name, expected] of [
@@ -41,10 +47,18 @@ const path = require("node:path");
       ["invalid.wav", "unknown"]
     ]) {
       await select(name);
+      assert.equal(await page.locator("#loudnessResult").getAttribute("data-result"), "pending");
+      assert.match(await page.locator("#loudnessResult").textContent(), /未解析/);
+      assert.equal(await page.locator("#analyze").isEnabled(), true);
+      await analyze();
       assert.equal(await page.locator("#loudnessResult").getAttribute("data-result"), expected);
       assert.equal(await page.locator("#convert").isEnabled(), true);
       console.log(name + ": " + await page.locator("#loudnessResult").textContent());
     }
+    await select("target.wav");
+    await analyze();
+    await analyze();
+    assert.equal(await page.locator("#loudnessResult").getAttribute("data-result"), "in-range");
     // A valid selection after failed analysis must still work, including encoding.
     await select("target.wav");
     assert.equal(await page.locator("#title").inputValue(), "Test tone");
@@ -54,6 +68,7 @@ const path = require("node:path");
       await page.waitForFunction(() => !document.querySelector("#convert").disabled,
         {}, { timeout: 120000 });
       assert.match(await page.locator("#status").textContent(), /完了：/);
+      assert.equal(await page.locator("#analyze").isEnabled(), true);
       const downloadPromise = page.waitForEvent("download");
       await page.locator("#download").click();
       const download = await downloadPromise;

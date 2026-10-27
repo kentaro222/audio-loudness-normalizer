@@ -396,8 +396,9 @@
     ></div>
 
 
+    <button id="analyze" type="button" disabled>ラウドネスを解析</button>
     <div id="loudnessResult" class="status" role="status" aria-live="polite">
-      元音声のラウドネス：ファイル選択後に自動解析します。
+      元音声のラウドネス：未解析。ファイルを選択して解析ボタンを押してください。
     </div>
     <p class="note">
       目標範囲：−14 LUFS ±0.5 LU、トゥルーピーク −1.5 dBTP以下。
@@ -787,6 +788,7 @@ const oggQualitySetting =
 let inputFile = null;
 let processing = false;
 const loudnessResult = $("#loudnessResult");
+const analyzeBtn = $("#analyze");
 
 async function analyzeSourceLoudness(file){
   const name = "loudness_input.bin";
@@ -1941,10 +1943,11 @@ async function showFile(
 ){
   if(processing) return;
   processing = true;
+  analyzeBtn.disabled = true;
   fileEl.disabled = true;
   inputFile = file;
-  loudnessResult.dataset.result = "analyzing";
-  loudnessResult.textContent = "元音声のラウドネス：解析待ち…";
+  loudnessResult.dataset.result = "pending";
+  loudnessResult.textContent = "元音声のラウドネス：未解析。解析ボタンを押してください。";
 
 
   const baseName =
@@ -2021,14 +2024,33 @@ async function showFile(
 
 
   setStatus(
-    "ファイルを読み込みました。タグとラウドネスを解析しています。",
+    "ファイルを読み込みました。タグを読み込んでいます。",
     "ok"
   );
 
 
   try{
     await readSourceMetadata(file);
-    await analyzeSourceLoudness(file);
+    setStatus("ファイルを読み込みました。解析または変換を実行できます。", "ok");
+  }finally{
+    processing = false;
+    analyzeBtn.disabled = false;
+    fileEl.disabled = false;
+    convertBtn.disabled = false;
+    progress.value = 0;
+  }
+}
+
+
+analyzeBtn.addEventListener("click", async () => {
+  if(!inputFile || processing) return;
+  processing = true;
+  analyzeBtn.disabled = true;
+  convertBtn.disabled = true;
+  fileEl.disabled = true;
+  setStatus("元音声のラウドネスを解析しています…");
+  try{
+    await analyzeSourceLoudness(inputFile);
     if(loudnessResult.dataset.result === "unknown"){
       setStatus("ラウドネスを判定できませんでした。処理ログを確認してください。");
     }else{
@@ -2036,11 +2058,12 @@ async function showFile(
     }
   }finally{
     processing = false;
-    fileEl.disabled = false;
+    analyzeBtn.disabled = false;
     convertBtn.disabled = false;
+    fileEl.disabled = false;
     progress.value = 0;
   }
-}
+});
 
 
 /* =========================================================
@@ -3323,6 +3346,7 @@ convertBtn.addEventListener(
 
 
     processing = true;
+    analyzeBtn.disabled = true;
     fileEl.disabled = true;
     convertBtn.disabled = true;
 
@@ -3789,6 +3813,7 @@ convertBtn.addEventListener(
 
     }finally{
       processing = false;
+      analyzeBtn.disabled = false;
       fileEl.disabled = false;
 
       progress.dataset.stage =
